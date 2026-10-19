@@ -1,0 +1,42 @@
+name: LibrarySweep
+options:
+  bundleIdPrefix: com.librarysweep
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+targets:
+  LibrarySweep:
+    type: application
+    platform: iOS
+    sources:
+      - path: LibrarySweep
+    info:
+      path: LibrarySweep/Info.plist
+      properties:
+        CFBundleDisplayName: LibrarySweep
+        # Mandatory privacy + networking keys (else camera / LAN uploads fail silently)
+        NSCameraUsageDescription: "Used to scan the room and books."
+        NSMicrophoneUsageDescription: "Used by the live voice agent."
+        NSLocalNetworkUsageDescription: "Upload sweep data to the local backend."
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          # Dev-only: allow cleartext ws:// to the LAN backend (NSAllowsLocalNetworking
+          # alone does not reliably cover URLSession WebSockets).
+          NSAllowsArbitraryLoads: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.librarysweep.app
+        TARGETED_DEVICE_FAMILY: "1"      # iPhone
+        SWIFT_VERSION: "5.0"             # Swift 5 language mode (relaxed concurrency)
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Signing: automatic, team baked in so regeneration preserves it.
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: "5Q4HH75JL5"

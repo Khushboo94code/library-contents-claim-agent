@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Sweep Agent</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: transparent;
+      font: 15px -apple-system, system-ui, sans-serif; color: #fff;
+      -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+    #ui { position: fixed; inset: 0; display: flex; flex-direction: column;
+          justify-content: space-between; pointer-events: none; }
+
+    /* Big state banner — always tells you what the agent is doing. */
+    #state { align-self: center; margin-top: 54px; padding: 10px 18px; border-radius: 22px;
+             background: rgba(0,0,0,.6); display: flex; align-items: center; gap: 9px;
+             font-size: 15px; font-weight: 600; pointer-events: auto; }
+    #stateDot { width: 11px; height: 11px; border-radius: 50%; background: #8e8e93; }
+    #state.ready      #stateDot { background: #30d158; }
+    #state.listening  #stateDot { background: #ff453a; animation: pulse 1s infinite; }
+    #state.thinking   #stateDot { background: #ffd60a; animation: pulse 1s infinite; }
+    #state.speaking   #stateDot { background: #0a84ff; animation: pulse 1s infinite; }
+    #state.error      #stateDot { background: #ff453a; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+    #panel { margin: 12px; display: flex; flex-direction: column; gap: 10px; }
+    #inventory { background: rgba(0,0,0,.6); border-radius: 14px; padding: 10px 12px;
+                 max-height: 30vh; overflow-y: auto; pointer-events: auto; }
+    #inventory h3 { margin: 0 0 6px; font-size: 12px; opacity: .6; font-weight: 600; text-transform: uppercase; }
+    .row { display: flex; gap: 8px; padding: 4px 0; border-top: 1px solid rgba(255,255,255,.08); }
+    .row .k { font-size: 11px; opacity: .6; min-width: 56px; text-transform: uppercase; }
+    .row .v { flex: 1; }
+
+    #caption { background: rgba(0,0,0,.6); border-radius: 12px; padding: 9px 12px;
+               min-height: 18px; pointer-events: auto; font-size: 14px; line-height: 1.35; }
+    #hint { text-align: center; font-size: 12px; opacity: .7; pointer-events: none; }
+
+    .controls { display: flex; gap: 10px; align-items: stretch; }
+    #sweepBtn { pointer-events: auto; padding: 14px; border: 0; border-radius: 16px;
+                background: #30d158; color: #fff; font-size: 15px; font-weight: 700; min-width: 108px; }
+    #sweepBtn.active { background: #ff453a; }
+    /* Hold-to-talk: big, obvious, press-and-hold. */
+    #talk { flex: 1; pointer-events: auto; border: 0; border-radius: 16px; color: #fff;
+            font-size: 17px; font-weight: 800; background: #0a84ff;
+            display: flex; align-items: center; justify-content: center; gap: 8px; touch-action: none; }
+    #talk.holding { background: #ff453a; transform: scale(0.98); }
+    #talk:disabled { opacity: .5; }
+    #connect { align-self: center; pointer-events: auto; padding: 12px 22px; border: 0;
+               border-radius: 14px; background: #0a84ff; color: #fff; font-size: 16px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <audio id="agentAudio" autoplay></audio>
+  <div id="ui">
+    <div id="state"><span id="stateDot"></span><span id="stateText">Connecting…</span></div>
+
+    <div id="panel">
+      <div id="inventory"><h3>Live inventory</h3><div id="items"></div></div>
+      <div id="caption"></div>
+      <div id="hint">Point at the floor, then pan each shelf slowly · Hold the blue button to talk</div>
+      <div class="controls">
+        <button id="sweepBtn">Start sweep</button>
+        <button id="talk">🎤 Hold to talk</button>
+      </div>
+      <button id="connect" style="display:none">Tap to start agent</button>
+    </div>
+  </div>
+  <script src="agent.js"></script>
+</body>
+</html>
