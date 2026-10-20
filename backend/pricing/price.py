@@ -406,6 +406,161 @@ def _search_amazon(query: str, country: str, books: bool) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# AbeBooks — used-book marketplace (new/used offers with condition, per country)
+# --------------------------------------------------------------------------- #
+
+# Localized AbeBooks sites (country -> (domain, market currency)). Countries not listed
+# have no local AbeBooks, so we price used on abebooks.com and mark the result converted.
+ABEBOOKS_LOCAL = {
+    "US": ("abebooks.com", "USD"),
+    "GB": ("abebooks.co.uk", "GBP"),
+    "DE": ("abebooks.de", "EUR"),
+    "FR": ("abebooks.fr", "EUR"),
+    "IT": ("abebooks.it", "EUR"),
+}
+_ABE_DEFAULT = ("abebooks.com", "USD")
+
+
+def _abe_source(country: str) -> tuple[str, str, bool]:
+    """(domain, market_currency, is_local) for the used-book search."""
+    cc = (country or "").upper()
+    if cc in ABEBOOKS_LOCAL:
+        dom, cur = ABEBOOKS_LOCAL[cc]
+        return dom, cur, True
+    dom, cur = _ABE_DEFAULT
+    return dom, cur, False
+
+
+def _default_abe_fetch(url: str) -> Optional[str]:
+    """Fetch an AbeBooks search page (direct curl_cffi — AbeBooks serves fine without the
+    Amazon proxy). Returns HTML only once it looks like real results. Never raises."""
+    try:
+        import curl_cffi.requests as cffi  # type: ignore
+    except Exception:
+        return None
+    headers = {"accept-language": "en-US,en;q=0.9", "user-agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")}
+    for _ in range(int(os.environ.get("ABE_RETRIES", "3"))):
+        try:
+            r = cffi.get(url, impersonate=_IMPERSONATE, headers=headers, timeout=_TIMEOUT, verify=False)
+            if r is not None and r.status_code == 200 and (
+                    "listing-price" in r.text or "srp-item-role" in r.text):
+                return r.text
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return None
+
+
+# Injectable AbeBooks fetch seam (tests stub this). Signature: (url) -> html|None.
+_ABE_FETCHER: Callable[..., Optional[str]] = _default_abe_fetch
+
+
+def set_abe_fetcher(fetcher: Callable[..., Optional[str]]) -> None:
+    """Override the AbeBooks network layer (tests). ``fetcher(url) -> html|None``."""
+    global _ABE_FETCHER
+    _ABE_FETCHER = fetcher
+
+
+def _abe_search_url(domain: str, title: str, author: str, isbn: str) -> str:
+    base = f"https://www.{domain}/servlet/SearchResults"
+    if isbn:
+        return f"{base}?isbn={quote_plus(isbn)}&sortby=17&bsi=0"
+    q = " ".join(p for p in (title, author) if p).strip()
+    return f"{base}?kn={quote_plus(q)}&sortby=17&bsi=0"  # sortby=17 = price low->high
+
+
+# A kept AbeBooks offer must share at least this fraction of the book's title tokens —
+# otherwise the keyword search drifts to unrelated academic/collectible editions that are
+# far pricier than the real book (e.g. "The Bhagavadgita" -> "Modern Indian Interpreters
+# of the Bhagavadgita"). And offers below the price floor are $1 placeholder/ship-cost
+# junk listings, not a real second-hand value.
+_ABE_TITLE_MATCH = float(os.environ.get("ABE_TITLE_MATCH", "0.5"))
+_ABE_MIN_PRICE = float(os.environ.get("ABE_MIN_PRICE", "3.0"))  # in the market currency
+
+
+def _search_abebooks(title: str, author: str, isbn: str, country: str) -> tuple[list[dict], str, bool]:
+    """Return (offers, market_currency, is_local). Each offer:
+    {amount, condition, url, title}. Offers whose listing title doesn't match the book, or
+    that are priced below the junk floor, are dropped. Empty on any failure."""
+    domain, market_cur, is_local = _abe_source(country)
+    try:
+        html = _ABE_FETCHER(_abe_search_url(domain, title, author, isbn))
+        if not html:
+            return [], market_cur, is_local
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "lxml")
+        offers: list[dict] = []
+        for el in soup.select('[data-srp-item-role="listing"]'):
+            pe = el.select_one('[data-test-id="listing-price"]')
+            amt = _parse_price(pe.get_text(strip=True)) if pe else None
+            if amt is None or amt < _ABE_MIN_PRICE:   # drop $1 placeholder/ship-cost junk
+                continue
+            ce = el.select_one('[data-test-id="listing-condition"]')
+            ae = el.select_one('[data-test-id="listing-title-link"]')
+            otitle = ae.get_text(" ", strip=True) if ae else ""
+            # Keep only offers for THIS book (skip when searching by ISBN — already exact).
+            if not isbn and title and _match_score(title, otitle) < _ABE_TITLE_MATCH:
+                continue
+            href = ae.get("href") if ae else ""
+            url = href if href.startswith("http") else f"https://www.{domain}{href}"
+            offers.append({"amount": amt, "url": url,
+                           "condition": ce.get_text(" ", strip=True) if ce else "",
+                           "title": otitle})
+        return offers, market_cur, is_local
+    except Exception:
+        return [], market_cur, is_local
+
+
+# --------------------------------------------------------------------------- #
+# FX conversion (for cross-market pricing; label `converted`)
+# --------------------------------------------------------------------------- #
+
+# Approximate USD-based fallback rates (1 USD -> X). Used offline / when the live
+# endpoint is unavailable. Refreshed rarely; the retrieval is recorded as converted.
+_FX_STATIC = {"USD": 1.0, "INR": 83.0, "GBP": 0.79, "EUR": 0.92, "AED": 3.67,
+              "SAR": 3.75, "MXN": 17.0, "TRY": 32.0, "BRL": 5.0, "CAD": 1.36}
+_FX_CACHE: dict[str, dict] = {}
+
+
+def _fx_rate(frm: str, to: str) -> Optional[float]:
+    """Rate to multiply a `frm` amount by to get `to`. Live (no-key) when FX_LIVE is set,
+    else a static table. None if unknown."""
+    frm, to = (frm or "").upper(), (to or "").upper()
+    if not frm or not to:
+        return None
+    if frm == to:
+        return 1.0
+    if os.environ.get("FX_LIVE"):
+        try:
+            if frm not in _FX_CACHE:
+                import curl_cffi.requests as cffi  # type: ignore
+                r = cffi.get(f"https://open.er-api.com/v6/latest/{frm}", timeout=15)
+                if r.status_code == 200 and r.json().get("result") == "success":
+                    _FX_CACHE[frm] = r.json()["rates"]
+            if frm in _FX_CACHE and to in _FX_CACHE[frm]:
+                return float(_FX_CACHE[frm][to])
+        except Exception:
+            pass
+    if frm in _FX_STATIC and to in _FX_STATIC:
+        return _FX_STATIC[to] / _FX_STATIC[frm]
+    return None
+
+
+def _fx_convert(amount: float, frm: str, to: str) -> Optional[float]:
+    """Convert `amount` from `frm` to `to`, rounded. None if no rate."""
+    rate = _fx_rate(frm, to)
+    return round(amount * rate, 2) if rate else None
+
+
+# Strong signals only — "first edition" alone is far too common to flag. We scan the
+# title/author and the CHOSEN offer, not every fuzzy search hit (which caused false positives).
+_RARE_SIGNALS = ("signed", "autographed", "antiquarian", "rare book", "limited edition",
+                 "collector", "first edition signed")
+
+
+# --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
 
@@ -417,16 +572,20 @@ def price_book(
     country: str = "IN",
     currency: str = "INR",
 ) -> dict:
-    """Source a book's new (replacement) and used price from the local Amazon.
+    """Source a book's new (replacement) and used price.
 
-    Returns ``{"replacement_cost": ReplacementCost, "used_value": UsedValue}``.
-    Amounts are ``None`` when nothing could be sourced — never fabricated.
+    * Replacement (new): the local Amazon marketplace. If no local price is found, we
+      price on amazon.com and FX-convert, marking ``converted=True``.
+    * Used value: AbeBooks (the used/second-hand book marketplace), localized per country
+      where one exists, else abebooks.com converted to the local currency.
 
-    ``currency`` is informational here: we read the local marketplace in its own
-    currency, so ``converted`` is always ``False`` (no cross-market conversion).
+    Returns ``{"replacement_cost", "used_value", "rare"}``. Amounts are ``None`` when
+    nothing could be sourced — never fabricated. ``rare`` flags likely signed/first-edition/
+    antiquarian copies for human appraisal.
     """
     retrieved_at = today_iso()
     result = _empty_book_result(retrieved_at)
+    result["rare"] = False
 
     query = " ".join(p for p in (title, author) if p).strip()
     if not query and isbn:
@@ -434,26 +593,57 @@ def price_book(
     if not query:
         return result
 
-    # Prefer an ISBN search (exact edition) when we have one, else title+author.
+    # --- Replacement (new) from the local Amazon marketplace -------------------------
     candidates = _search_amazon(isbn, country, books=True) if isbn else []
     if not candidates:
         candidates = _search_amazon(query, country, books=True)
-    if not candidates:
-        return result
+    best = candidates[0] if candidates else None
+    prices = (best.get("prices") if best else None) or []
+    if prices:
+        result["replacement_cost"].update(
+            {"amount": prices[0], "source": "amazon", "url": best["url"]})
+    elif (country or "").upper() != "US":
+        # No local price → price on amazon.com and convert (brief: label as converted).
+        ref = _search_amazon(query, "US", books=True)
+        ref_prices = (ref[0].get("prices") if ref else None) or []
+        if ref_prices:
+            conv = _fx_convert(ref_prices[0], "USD", currency)
+            if conv is not None:
+                result["replacement_cost"].update(
+                    {"amount": conv, "source": "amazon.com (converted)",
+                     "url": ref[0]["url"], "converted": True})
 
-    best = candidates[0]
-    prices = best.get("prices") or []
-    if not prices:
-        return result
+    # --- Used value from AbeBooks -----------------------------------------------------
+    offers, market_cur, is_local = _search_abebooks(title, author, isbn, country)
+    used = [o for o in offers if "used" in (o.get("condition") or "").lower()]
+    pick = (min(used, key=lambda o: o["amount"]) if used
+            else (min(offers, key=lambda o: o["amount"]) if offers else None))
+    if pick:
+        amount = pick["amount"]
+        condition = pick.get("condition") or "Used"
+        if market_cur != currency:
+            conv = _fx_convert(amount, market_cur, currency)
+            if conv is not None:
+                amount = conv
+                condition = f"{condition}; converted from {market_cur}"
+        # Safety net: a used copy should not cost MORE than a new one. If it does, the
+        # AbeBooks listing is a different/collectible edition that slipped past the title
+        # match — drop the used value rather than assert an implausible figure.
+        new_amount = result["replacement_cost"].get("amount")
+        if new_amount and amount > new_amount:
+            pick = None
+        else:
+            result["used_value"].update(
+                {"amount": amount, "source": "abebooks", "url": pick["url"],
+                 "condition_assumed": condition})
 
-    # Replacement (new) = the current selling price = the lowest price shown on the
-    # card (the larger value, if any, is the struck-through MRP, not a used offer).
-    result["replacement_cost"].update(
-        {"amount": prices[0], "source": "amazon", "url": best["url"]}
-    )
-    # Used value is NOT inferable from a search card (the second price is the MRP).
-    # A real used figure needs the product page's "other sellers" (AOD) — left None
-    # here rather than mislabel the list price as used.
+    # --- Rare / signed / antiquarian flag --------------------------------------------
+    # Scan only the book itself and the chosen offer — not every fuzzy search hit.
+    blob = " ".join([title, author,
+                     (pick or {}).get("condition", ""), (pick or {}).get("title", "")]).lower()
+    if any(sig in blob for sig in _RARE_SIGNALS):
+        result["rare"] = True
+
     return result
 
 

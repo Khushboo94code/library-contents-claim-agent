@@ -11,7 +11,7 @@ final class BackendMonitor: ObservableObject {
 
     private var timer: Timer?
     // Uploads server; if this is reachable the backend process is alive.
-    private let url = URL(string: "http://172.20.10.2:8000/health")!
+    private let url = URL(string: "http://MacBook-Pro-2.local:8000/health")!
 
     func start() {
         check()

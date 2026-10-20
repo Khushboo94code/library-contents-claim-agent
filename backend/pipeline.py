@@ -43,6 +43,13 @@ from backend.spines.measure import fiducial_plane_camera, measure_spine, measure
 # an identified book — stops low-confidence guesses / random objects showing as titled books.
 BOOK_CONFIDENCE_FLOOR = float(os.environ.get("BOOK_CONFIDENCE_FLOOR", "0.45"))
 
+# A title must be read in at least this many DISTINCT frames to be "identified". A blurry
+# frame can make the model confidently hallucinate famous titles (e.g. a smeared stack read
+# as Atomic Habits / The Alchemist); such fabrications are frame-specific and never recur,
+# while a real book panned over several frames is seen repeatedly. Uncorroborated reads drop
+# to unidentified (kept with dimensions, no guessed title).
+MIN_ID_FRAMES = int(os.environ.get("MIN_ID_FRAMES", "2"))
+
 # Stage D is optional until the pricing module is present.
 try:
     from backend.pricing.price import price_book, price_item
@@ -125,6 +132,7 @@ def _stage_a_books(sweep_id, store, api_key, bundle, scale: float) -> list[Book]
         idx = _match_index(key, norms)
         if idx >= 0:
             cur = acc[idx]
+            cur["frames"].add(fref)
             if conf > (cur["conf"] or 0) or (len(title) > len(cur["title"]) and conf >= (cur["conf"] or 0)):
                 cur.update(title=title, author=(r.get("author") or "").strip() or cur["author"],
                            conf=conf, frame_ref=fref)
@@ -133,13 +141,22 @@ def _stage_a_books(sweep_id, store, api_key, bundle, scale: float) -> list[Book]
                 cur["dims"] = dims
             continue
         acc.append({"title": title, "author": (r.get("author") or "").strip(),
-                    "conf": conf, "frame_ref": fref, "dims": dims})
+                    "conf": conf, "frame_ref": fref, "dims": dims, "frames": {fref}})
         norms.append(key)
 
-    books = [Book(id=f"b{i+1}", status="identified", title=a["title"], author=a["author"],
-                  frame_ref=a["frame_ref"], id_confidence=round(a["conf"], 2),
-                  spine_height_cm=a["dims"][0], spine_thickness_cm=a["dims"][1])
-             for i, a in enumerate(acc)]
+    # Corroboration gate: titles seen in only ONE frame are likely single-frame hallucinations
+    # (a blurry stack read as famous bestsellers). Keep them as UNIDENTIFIED spines (dims, no
+    # title) instead of asserting a guessed title.
+    books: list[Book] = []
+    bi = 0
+    for a in acc:
+        if len(a["frames"]) >= MIN_ID_FRAMES:
+            bi += 1
+            books.append(Book(id=f"b{bi}", status="identified", title=a["title"], author=a["author"],
+                              frame_ref=a["frame_ref"], id_confidence=round(a["conf"], 2),
+                              spine_height_cm=a["dims"][0], spine_thickness_cm=a["dims"][1]))
+        else:
+            unreadable[a["frame_ref"]].append({"frame_ref": a["frame_ref"], "dims": a["dims"]})
 
     # Unidentified: conservative count = the single frame with the most unreadable book
     # spines (cross-frame dedup of unreadable spines isn't possible without poses; summing
@@ -197,7 +214,10 @@ def _price_books(books: list[Book], country: str, currency: str) -> None:
             rc, uv = res.get("replacement_cost", {}), res.get("used_value", {})
             b.replacement_cost = ReplacementCost(**rc) if rc else b.replacement_cost
             b.used_value = UsedValue(**uv) if uv else b.used_value
-            if b.replacement_cost.amount and b.replacement_cost.amount > APPRAISAL_THRESHOLD:
+            # Route to human appraisal: over the value threshold, OR flagged rare/signed
+            # (brief: do not auto-price rare/signed/antiquarian copies).
+            over_threshold = b.replacement_cost.amount and b.replacement_cost.amount > APPRAISAL_THRESHOLD
+            if over_threshold or res.get("rare"):
                 b.status = "needs_appraisal"
 
 

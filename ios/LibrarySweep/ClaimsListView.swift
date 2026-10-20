@@ -20,7 +20,7 @@ struct ClaimsListView: View {
 
     @State private var claims: [ClaimSummary] = []
     @State private var loading = true
-    private let base = "http://172.20.10.2:8000"
+    private let base = "http://MacBook-Pro-2.local:8000"
 
     var body: some View {
         ZStack {
@@ -35,13 +35,13 @@ struct ClaimsListView: View {
                 .padding(20)
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(.light)
         .task { await load() }
     }
 
     @ViewBuilder private var content: some View {
         if loading {
-            Spacer(); ProgressView().tint(.white); Spacer()
+            Spacer(); ProgressView().tint(Theme.textSecondary); Spacer()
         } else if claims.isEmpty {
             Spacer()
             VStack(spacing: 10) {
@@ -66,17 +66,17 @@ struct ClaimsListView: View {
         HStack {
             Button(action: onBack) {
                 Image(systemName: "chevron.left").font(.headline).foregroundStyle(Theme.textPrimary)
-                    .frame(width: 38, height: 38).background(Color.white.opacity(0.07)).clipShape(Circle())
+                    .frame(width: 38, height: 38).background(Theme.surface2).clipShape(Circle())
             }
             Spacer()
             HStack(spacing: 8) {
                 LogoMark(size: 24, corner: 7)
-                Text("Insurance Claims").font(.title3.bold()).foregroundStyle(Theme.textPrimary)
+                Text("INSURANCE CLAIMS").font(Theme.display(19)).tracking(-0.3).foregroundStyle(Theme.textPrimary)
             }
             Spacer()
             Button { Task { await load() } } label: {
                 Image(systemName: "arrow.clockwise").font(.headline).foregroundStyle(Theme.textPrimary)
-                    .frame(width: 38, height: 38).background(Color.white.opacity(0.07)).clipShape(Circle())
+                    .frame(width: 38, height: 38).background(Theme.surface2).clipShape(Circle())
             }
         }
         .padding(.horizontal, 20).padding(.vertical, 12)

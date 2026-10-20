@@ -6,7 +6,7 @@
 import SwiftUI
 import WebKit
 
-private let REPORT_BASE = "http://172.20.10.2:8000"
+private let REPORT_BASE = "http://MacBook-Pro-2.local:8000"
 
 struct ReportScreen: View {
     let sweepId: String
@@ -21,16 +21,16 @@ struct ReportScreen: View {
             HStack(spacing: 12) {
                 iconButton("folder.fill", action: onClaims)
                 LogoMark(size: 26, corner: 7)
-                Text("Claim Packet").font(.headline).foregroundStyle(.white)
+                Text("CLAIM PACKET").font(Theme.display(17)).tracking(-0.2).foregroundStyle(Theme.textPrimary)
                 Spacer()
                 Button(action: downloadPDF) {
                     HStack(spacing: 6) {
-                        if exporting { ProgressView().tint(.white).scaleEffect(0.8) }
+                        if exporting { ProgressView().tint(Theme.onAccent).scaleEffect(0.8) }
                         else { Image(systemName: "arrow.down.doc.fill") }
-                        Text("PDF").font(.subheadline.weight(.semibold))
+                        Text("PDF").font(.subheadline.weight(.bold))
                     }
                     .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(Theme.accentGradient).foregroundStyle(.white)
+                    .background(Theme.lime).foregroundStyle(Theme.onAccent)
                     .clipShape(Capsule())
                 }
                 .disabled(exporting)
@@ -42,13 +42,13 @@ struct ReportScreen: View {
             ReportWebView(sweepId: sweepId)
         }
         .background(Theme.bg.ignoresSafeArea())
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(.light)
     }
 
     private func iconButton(_ name: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: name).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                .frame(width: 36, height: 36).background(Color.white.opacity(0.08)).clipShape(Circle())
+            Image(systemName: name).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.textPrimary)
+                .frame(width: 36, height: 36).background(Theme.surface2).clipShape(Circle())
         }
     }
 

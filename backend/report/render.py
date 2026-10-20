@@ -19,37 +19,35 @@ _TEMPLATE = Template(
 {% if processing %}<meta http-equiv="refresh" content="4"/>{% endif %}
 <title>Claim Packet — {{ sweep_id }}</title>
 <style>
-  :root { color-scheme: light dark; --accent: #8b6bf2; }
+  :root { color-scheme: light; --ink:#1C1C18; --sage:#A6C089; --sage-deep:#8FB06E;
+          --lime:#DCEE4A; --lav:#C7BCDF; --cream:#F5F2EA; --taupe:#DED8C8; --line: rgba(28,28,24,.12); }
   body { font: 15px -apple-system, system-ui, sans-serif; margin: 0; padding: 0 20px 28px;
-         background: #0b0b13; color: #f2f2f7; }
-  .hero { margin: 0 -20px 20px; padding: 26px 20px 20px;
-          background: linear-gradient(135deg, #5b5bf0, #9b6bf2); color: #fff; }
-  h1 { font-size: 24px; font-weight: 800; margin: 0 0 4px; letter-spacing: -.2px; }
-  .sub { opacity: .85; font-size: 13px; }
+         background: #E8E3D6; color: var(--ink); }
+  .hero { margin: 0 -20px 20px; padding: 28px 20px 22px;
+          background: linear-gradient(135deg, #B2C994, #8FB06E); color: var(--ink); }
+  h1 { font-size: 30px; font-weight: 800; margin: 0 0 4px; letter-spacing: -.6px; text-transform: uppercase; }
+  .sub { opacity: .7; font-size: 13px; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap: 10px; margin-bottom: 22px; }
-  .card { background: #16161f; border: 1px solid rgba(255,255,255,.07); border-radius: 16px; padding: 15px; }
-  .card .n { font-size: 25px; font-weight: 800; color: var(--accent); }
-  .card .l { font-size: 11px; opacity: .55; text-transform: uppercase; letter-spacing: .4px; margin-top: 2px; }
-  h2 { font-size: 16px; margin: 26px 0 10px; display: flex; align-items: center; gap: 8px; }
-  h2::before { content: ""; width: 4px; height: 16px; background: var(--accent); border-radius: 3px; }
+  .card { background: var(--cream); border: none; border-radius: 22px; padding: 16px;
+          box-shadow: 0 8px 16px rgba(28,28,24,.06); }
+  .card .n { font-size: 26px; font-weight: 800; color: var(--ink); letter-spacing: -.5px; }
+  .card .l { font-size: 11px; opacity: .5; text-transform: uppercase; letter-spacing: .4px; margin-top: 2px; }
+  h2 { font-size: 16px; margin: 26px 0 10px; display: flex; align-items: center; gap: 8px;
+       text-transform: uppercase; letter-spacing: -.2px; font-weight: 800; }
+  h2::before { content: ""; width: 5px; height: 16px; background: var(--sage-deep); border-radius: 3px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #2c2c2e; vertical-align: top; }
-  th { opacity: .6; font-weight: 600; font-size: 11px; text-transform: uppercase; }
-  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
-  .identified { background: #0a3d1f; color: #30d158; }
-  .unidentified, .range { background: #3a2e0a; color: #ffd60a; }
-  .needs_appraisal, .priced { background: #0a2a3d; color: #64d2ff; }
-  .empty { opacity: .45; font-style: italic; padding: 10px 0; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { opacity: .5; font-weight: 700; font-size: 11px; text-transform: uppercase; }
+  .pill { display: inline-block; padding: 3px 9px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .identified { background: #E2EFD0; color: #3E6B22; }
+  .unidentified, .range { background: #F0EEBE; color: #6f6210; }
+  .needs_appraisal, .priced { background: #E8E1F2; color: #5b4a86; }
+  .empty { opacity: .5; font-style: italic; padding: 10px 0; }
   .money { font-variant-numeric: tabular-nums; }
   .muted { opacity: .5; }
   {% if pdf %}
-  /* Light, print-friendly theme for the downloadable PDF. */
-  body { background: #fff; color: #1a1a1a; }
-  .card { background: #f3f4f6; }
-  h1, h2 { color: #111; }
-  .sub, .muted { color: #555; opacity: 1; }
-  th { color: #444; }
-  th, td { border-bottom: 1px solid #ddd; }
+  /* Print-friendly: pure-white page behind the warm cards. */
+  body { background: #fff; }
   {% endif %}
 </style></head>
 <body>
@@ -59,7 +57,7 @@ _TEMPLATE = Template(
       {% if p.sweep.captured_at %}· {{ p.sweep.captured_at }}{% endif %}
       {% if p.sweep.country %}· {{ p.sweep.country }} / {{ p.sweep.currency }}{% endif %}</div>
   </div>
-  {% if processing %}<div class="card" style="background:#2a2410;border:1px solid #ffd60a33;margin-bottom:16px">
+  {% if processing %}<div class="card" style="background:#F0EEBE;margin-bottom:16px">
     ⏳ <b>Compiling your packet…</b> reading spines and assembling the inventory. This page refreshes automatically.
   </div>{% endif %}
 

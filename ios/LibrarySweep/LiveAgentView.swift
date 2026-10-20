@@ -53,7 +53,16 @@ struct LiveAgentView: View {
             dividerDot
             label("PLANES", "\(ar.planeCount)")
             dividerDot
-            label("PRICE", "\(voice.country)·\(voice.currency)")
+            Menu {
+                ForEach(LiveVoiceManager.supportedCountries, id: \.self) { cc in
+                    Button("\(cc) · \(LiveVoiceManager.currencyFor(cc))") {
+                        voice.country = cc
+                        voice.currency = LiveVoiceManager.currencyFor(cc)
+                    }
+                }
+            } label: {
+                label("PRICE", "\(voice.country)·\(voice.currency) ▾")
+            }
             if voice.liveVision { dividerDot; label("VISION", "on") }
         }
         .padding(.horizontal, 14).padding(.vertical, 7)
@@ -75,7 +84,7 @@ struct LiveAgentView: View {
                 ForEach(Array(voice.inventory.enumerated()), id: \.element.id) { i, e in
                     HStack(alignment: .top, spacing: 8) {
                         Text(e.kind.uppercased()).font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(Theme.accentB).frame(width: 46, alignment: .leading).padding(.top, 1)
+                            .foregroundStyle(Theme.lime).frame(width: 46, alignment: .leading).padding(.top, 1)
                         Text(e.label + (e.note.isEmpty ? "" : " — \(e.note)")).font(.caption).foregroundStyle(.white)
                         Spacer()
                     }

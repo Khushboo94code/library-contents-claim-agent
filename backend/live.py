@@ -24,8 +24,6 @@ import json
 import os
 import re
 import time
-from difflib import SequenceMatcher
-
 from google import genai
 from google.genai import types
 
@@ -37,28 +35,35 @@ MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-3.8-live")
 # audio-only). Configurable — "off" = the agent directs by voice but doesn't see content.
 LIVE_VISION = os.environ.get("GEMINI_LIVE_VISION", "on").lower() in ("on", "true", "1", "yes")
 LIVE_VISION_MIN_INTERVAL = float(os.environ.get("LIVE_VISION_INTERVAL_S", "3.0"))
+# Only speak a live book TITLE when the spine read is at least this confident — below it we
+# say "a book" and leave the real title to the post-sweep Stage A (avoids live hallucination).
+LIVE_BOOK_CONF = float(os.environ.get("LIVE_BOOK_CONF", "0.8"))
 
 _LIVE_VISION_PROMPT = (
-    "You are the eyes of a live library-sweep agent. From this ONE camera frame, briefly list "
-    "books/items clearly visible and legible right now. Do NOT guess unreadable spines. "
-    "Use kind 'art' for any painting, portrait, or framed picture. "
-    "Also report unreadable_spines: how many book spines are clearly present but too blurry, "
-    "small, or glare-washed to read (0 if the frame is clean). "
-    'Return JSON: {"visible":[{"kind":"book|item|art","label":"short name"}],'
-    '"unreadable_spines":0,"summary":"one short phrase"}. '
-    "Empty list if nothing is clearly identifiable."
+    "You are the eyes of a live library-sweep agent looking at ONE camera frame. "
+    "List everything clearly visible, each as {\"kind\":\"item\"|\"art\"|\"book\",\"label\":"
+    "\"short name\",\"confidence\":0.0}. Use 'art' for paintings/portraits/framed pictures. "
+    "For a BOOK, only set the label to its real title if the spine/cover is SHARP and you can "
+    "read it with high confidence — otherwise use label 'book' with a LOW confidence and never "
+    "guess a title (a wrong title is worse than none). "
+    "Also report book_count: total book spines visible including unreadable ones (0 if none). "
+    'Return strict JSON: {"visible":[...],"book_count":0,"unreadable_spines":0,'
+    '"summary":"one short phrase of the whole scene"}.'
 )
 
 AGENT_INSTRUCTIONS = (
     "You are the live capture director for a home-contents insurance sweep of a book library. "
     "Keep every spoken turn to ONE short sentence. "
-    "At the very start, greet the user and CONFIRM the country and currency you will price in "
-    "(the app tells you the device's detected country/currency). If they confirm, or tell you a "
-    "different country, call set_locale with the ISO country code and currency code so pricing "
-    "uses the right local Amazon marketplace. "
-    "Then direct the user where to point, note what you see, and ask only what you cannot tell "
-    "from video. Never state prices or measurements — those are computed later from real sources. "
-    "When you recognize something worth logging, call log_observation."
+    "At the start, ASK the user which country and currency they want prices in — do not assume "
+    "or name a country yourself. When they tell you, call set_locale with its ISO country and "
+    "currency codes so pricing uses the right local Amazon marketplace. If they don't say, "
+    "pricing quietly defaults to Indian rupees. They can change it anytime, by voice or the "
+    "on-screen locale chip. "
+    "Then direct the user where to point and SAY WHAT YOU SEE — name the items, artworks, and "
+    "any book titles you are explicitly given — so they know it's being logged. Never state "
+    "prices or measurements (computed later). Never INVENT a book title: only say a title when "
+    "it is given to you; for unreadable spines say 'your books' and that titles are read after "
+    "the sweep. When you recognize something worth logging, call log_observation."
 )
 
 _LOG_OBS = types.FunctionDeclaration(
@@ -100,12 +105,23 @@ def _client() -> genai.Client:
     )
 
 
+# Pin a single prebuilt voice so every turn (and every reconnect) sounds like the same
+# agent — without this the model can default to a different voice per session, which is
+# why the user heard "two different voices".
+_VOICE = os.environ.get("GEMINI_LIVE_VOICE", "Aoede")
+
+
 def _config() -> types.LiveConnectConfig:
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
         system_instruction=AGENT_INSTRUCTIONS,
         output_audio_transcription={},
         input_audio_transcription={},
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=_VOICE)
+            )
+        ),
         tools=[types.Tool(function_declarations=[_LOG_OBS, _SET_LOCALE])],
         realtime_input_config=types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
@@ -123,18 +139,28 @@ async def run_live_bridge(ws) -> None:
         last_narration = [0.0]    # throttle timestamp (proactive spoken cues)
         latest_visual = [""]      # most recent "what's on camera" summary
         user_talking = [False]    # true between activity_start/activity_end (don't talk over them)
+        agent_speaking = [False]  # true while the agent is mid-turn (set in gemini_to_browser)
+        last_audio_ts = [0.0]     # last time agent audio arrived (safety valve for a missed turn_complete)
         asked_art = [False]       # ask "original or print?" once, not every framed piece
-        seen_labels: list[str] = []  # fuzzy-dedup the live inventory across frames
+        announced_books = [False]  # tell the user books are being catalogued once, not per frame
+        last_new_ts = [time.monotonic()]  # last time something NEW was shown (for the move nudge)
+        nudged = [False]          # asked the user to move since the last new thing (don't repeat)
+        seen_tokens: list[frozenset] = []  # token-set dedup of the live inventory across frames
 
-        # How often the agent may speak an UNPROMPTED cue (logging / "step closer"). Kept
-        # well above the vision interval so it narrates highlights, not every frame.
+        # How often the agent may speak an UNPROMPTED cue (logging / "step closer" / "move on").
         narration_gap = float(os.environ.get("LIVE_NARRATION_GAP_S", "7.0"))
+        # How long a view may be static (nothing new) before we direct the user to move on.
+        static_nudge_s = float(os.environ.get("STATIC_NUDGE_S", "6.0"))
 
         async def _speak(instruction: str) -> None:
-            """Make the live agent say a one-liner, but only if the user isn't mid-turn and
-            we're off cooldown — an injected turn mustn't collide with push-to-talk."""
+            """Make the live agent say a one-liner — but never while the user is talking, while the
+            agent is already mid-sentence (that caused the double-speech), or inside the cooldown."""
             now = time.monotonic()
-            if user_talking[0] or now - last_narration[0] < narration_gap:
+            # Clear a stuck "speaking" flag if no audio has arrived for a couple of seconds
+            # (guards against a missed turn_complete permanently muting cues).
+            if agent_speaking[0] and now - last_audio_ts[0] > 2.0:
+                agent_speaking[0] = False
+            if user_talking[0] or agent_speaking[0] or now - last_narration[0] < narration_gap:
                 return
             last_narration[0] = now
             try:
@@ -145,13 +171,20 @@ async def run_live_bridge(ws) -> None:
                 print(f"[live] narration error (continuing): {exc!r}")
 
         def _is_new(label: str) -> bool:
-            norm = re.sub(r"[^a-z0-9]", "", label.lower())
-            if not norm:
+            # Compare by TOKEN SET, not string order. The live model re-describes the same object
+            # with reordered/variant words every pass ("purple rolled yoga mat" vs "rolled purple
+            # yoga mat") — order-sensitive matching treated those as new, which both re-announced
+            # the item AND kept resetting the "nothing new" clock so the move nudge never fired.
+            toks = frozenset(t for t in re.split(r"[^a-z0-9]+", label.lower()) if len(t) > 2)
+            if not toks:
                 return False
-            for n in seen_labels:
-                if n == norm or n in norm or norm in n or SequenceMatcher(None, n, norm).ratio() >= 0.84:
+            for seen in seen_tokens:
+                inter = len(toks & seen)
+                union = len(toks | seen)
+                # Jaccard overlap >= 0.5 (order-independent) == same item.
+                if union and inter / union >= 0.5:
                     return False
-            seen_labels.append(norm)
+            seen_tokens.append(toks)
             return True
 
         async def recognize_frame(b64: str) -> None:
@@ -168,39 +201,81 @@ async def run_live_bridge(ws) -> None:
             except Exception as exc:  # noqa: BLE001
                 print(f"[live] vision error: {exc!r}")
                 return
-            visible = data.get("visible") or []
+            raw = data.get("visible") or []
+            book_count = int(data.get("book_count") or 0)
+            unreadable = int(data.get("unreadable_spines") or 0)
             summary = (data.get("summary") or "").strip()
             if summary:
                 latest_visual[0] = summary
-            # Only push items we haven't already shown (fuzzy) — no duplicate inventory rows.
-            fresh = [it for it in visible if _is_new((it.get("label") or "").strip())]
+
+            def _conf(it) -> float:
+                try:
+                    return float(it.get("confidence") or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            # NAMEABLE things we can speak confidently: every item/artwork, plus any book whose
+            # title was read with high confidence (anything lower stays an anonymous "book").
+            nameable = []
+            for it in raw:
+                kind = (it.get("kind") or "item").lower()
+                label = (it.get("label") or "").strip()
+                if not label:
+                    continue
+                if kind == "book":
+                    if _conf(it) >= LIVE_BOOK_CONF and label.lower() not in ("book", "books"):
+                        nameable.append({"kind": "book", "label": label, "confidence": _conf(it)})
+                    # low-confidence books fall through to the book_count acknowledgement
+                else:
+                    nameable.append({"kind": kind, "label": label})
+
+            fresh = [it for it in nameable if _is_new(it["label"])]
+            # Count books not confidently titled (so we can still acknowledge them).
+            titled_books = sum(1 for it in fresh if it["kind"] == "book")
+            anon_books = max(0, book_count - titled_books)
+            new_books = anon_books > 0 and not announced_books[0]
+
             if fresh:
                 await ws.send_text(json.dumps({"type": "recognition", "items": fresh}))
+            if new_books:
+                announced_books[0] = True
+                await ws.send_text(json.dumps({"type": "recognition", "items": [
+                    {"kind": "book", "label": "Books on the shelf", "note": "titles read after the sweep"}]}))
+            if fresh or new_books:
+                last_new_ts[0] = now
+                nudged[0] = False
 
-            # Proactively narrate: the agent should SAY what it's logging (requirement 1),
-            # coach the user closer when spines are unreadable, and ASK about things it can't
-            # tell from video — e.g. whether a portrait is an original or a print (requirement 4,
-            # art defaults to needs_appraisal unless the user says print). All gated/throttled
-            # inside _speak so they never talk over a push-to-talk turn.
-            unreadable = int(data.get("unreadable_spines") or 0)
-            fresh_art = [it for it in fresh if (it.get("kind") or "") == "art"]
+            # Narrate ONE specific sentence per pass (throttled + agent-busy-guarded). Name what
+            # you actually see — items, artworks, and confidently-read book titles.
+            fresh_art = [it for it in fresh if it["kind"] == "art"]
+            fresh_named = [it["label"] for it in fresh]
             if fresh_art and not asked_art[0]:
                 asked_art[0] = True
-                name = (fresh_art[0].get("label") or "that piece").strip()
                 await _speak(
-                    f"You can see a framed artwork ({name}). In ONE short sentence, ask the user "
-                    "whether it is an original or a print, so it can be valued correctly.")
-            elif fresh:
-                labels = ", ".join((it.get("label") or "").strip() for it in fresh[:3] if it.get("label"))
-                if labels:
-                    await _speak(
-                        f"You are logging these onto the inventory right now: {labels}. "
-                        "Tell the user in ONE short sentence that you're logging them. "
-                        "Do not mention prices or measurements.")
+                    f"You can see a framed artwork ({fresh_art[0]['label']}). In ONE short sentence, "
+                    "ask the user whether it is an original or a print, so it can be valued correctly.")
+            elif fresh_named:
+                labels = ", ".join(fresh_named[:4])
+                extra = (" and some books you'll read after the sweep" if new_books else "")
+                await _speak(
+                    f"You can now see: {labels}{extra}. In ONE short, natural sentence, tell the user "
+                    "specifically what you see and that you're adding it to the inventory. Do not "
+                    "mention prices or measurements.")
+            elif new_books:
+                await _speak(
+                    "You can see books on the shelf you cannot read clearly yet. In ONE short sentence, "
+                    "tell the user you've got their books and will read and price every spine after the sweep.")
             elif unreadable >= 2:
                 await _speak(
                     "Several book spines in view are too blurry to read. In ONE short sentence, "
                     "ask the user to slow down and move a little closer to that shelf.")
+            elif not nudged[0] and now - last_new_ts[0] > static_nudge_s:
+                # Nothing new for a while → the shelf/area is done. Direct the user onward
+                # (ONCE) instead of repeating the inventory.
+                nudged[0] = True
+                await _speak(
+                    "You have logged everything currently in view. In ONE short sentence, ask the "
+                    "user to slowly pan to the next shelf or area of the room.")
 
         async def browser_to_gemini():
             while True:
@@ -246,14 +321,19 @@ async def run_live_bridge(ws) -> None:
             while True:
                 async for m in session.receive():
                     if m.data:
+                        agent_speaking[0] = True           # agent is mid-turn — don't inject cues
+                        last_audio_ts[0] = time.monotonic()
                         await ws.send_bytes(m.data)
                     sc = m.server_content
                     if sc:
                         if sc.output_transcription and sc.output_transcription.text:
+                            agent_speaking[0] = True
+                            last_audio_ts[0] = time.monotonic()
                             await ws.send_text(json.dumps({"type": "out_transcript", "text": sc.output_transcription.text}))
                         if sc.input_transcription and sc.input_transcription.text:
                             await ws.send_text(json.dumps({"type": "in_transcript", "text": sc.input_transcription.text}))
                         if sc.turn_complete:
+                            agent_speaking[0] = False       # turn finished — cues allowed again
                             await ws.send_text(json.dumps({"type": "turn_complete"}))
                     if m.tool_call:
                         for fc in m.tool_call.function_calls:

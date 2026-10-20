@@ -251,6 +251,14 @@ def _spoken_summary(p: dict) -> str:
         if unident:
             s += f" and {unident} I could not read"
         parts.append(s + ".")
+        # Name a few identified titles so the user hears WHICH books (resolved from sharp
+        # frames after the sweep — never guessed live).
+        titles = [b.get("title") for b in p.get("books", [])
+                  if b.get("status") == "identified" and b.get("title")]
+        if titles:
+            named = ", ".join(titles[:3])
+            more = f", and {len(titles) - 3} more" if len(titles) > 3 else ""
+            parts.append(f"These include {named}{more}.")
 
     items = len(p.get("items", []))
     if items:

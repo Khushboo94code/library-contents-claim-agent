@@ -26,8 +26,8 @@ final class LiveVoiceManager: NSObject, ObservableObject, URLSessionDelegate {
 
     // Native doesn't need TLS (that was only for the browser's getUserMedia), so use the
     // plain ws:// server on 8000 — no cert trust needed. ATS allows this via NSAllowsLocalNetworking.
-    private let wsURL = URL(string: "ws://172.20.10.2:8000/live")!
-    private let obsBase = "http://172.20.10.2:8000"
+    private let wsURL = URL(string: "ws://MacBook-Pro-2.local:8000/live")!
+    private let obsBase = "http://MacBook-Pro-2.local:8000"
 
     @Published var state: VoiceState = .connecting
     @Published var stateText = "Connecting…"
@@ -35,19 +35,13 @@ final class LiveVoiceManager: NSObject, ObservableObject, URLSessionDelegate {
     @Published var inventory: [InventoryEntry] = []
     @Published var liveVision = false   // set from the backend's "ready" (GEMINI_LIVE_VISION)
 
-    // Locale the sweep prices in. Defaulted from the DEVICE (never hardcoded), then confirmed
-    // or corrected by voice at the start — the agent calls set_locale, which updates these,
-    // and they flow into the sweep meta so pricing hits the right local Amazon marketplace.
-    @Published var country = LiveVoiceManager.deviceCountry()
-    @Published var currency = LiveVoiceManager.deviceCurrency()
+    // Locale the sweep prices in. Quietly DEFAULTS to India/INR (the fallback); the agent asks
+    // the user which country to use, and they can change it anytime by voice (set_locale) or by
+    // tapping the on-screen chip. Whatever is set when they tap Start sweep is what's priced.
+    @Published var country = "IN"
+    @Published var currency = "INR"
 
-    private static func deviceCountry() -> String {
-        Locale.current.region?.identifier ?? "US"
-    }
-    private static func deviceCurrency() -> String {
-        Locale.current.currency?.identifier ?? currencyFor(deviceCountry())
-    }
-    /// Fallback country -> currency map (matches the backend's supported Amazon marketplaces).
+    /// Country -> currency map (matches the backend's supported Amazon marketplaces).
     static func currencyFor(_ cc: String) -> String {
         ["IN": "INR", "US": "USD", "GB": "GBP", "DE": "EUR", "AE": "AED",
          "SA": "SAR", "MX": "MXN", "TR": "TRY", "BR": "BRL"][cc.uppercased()] ?? "USD"
@@ -65,6 +59,13 @@ final class LiveVoiceManager: NSObject, ObservableObject, URLSessionDelegate {
     private var started = false
     private var reconnectAttempts = 0
 
+    // Greet ONCE per session (not on every reconnect, which was causing repeated speech).
+    private var didGreet = false
+
+    // Supported pricing locales (match the backend's Amazon marketplaces). The user can tap
+    // the locale chip to change it; the agent can also set it by voice (set_locale).
+    static let supportedCountries = ["IN", "US", "GB", "DE", "AE", "SA", "MX", "TR", "BR"]
+
     // lazy so they're created only when voice starts (not at app launch) — a nil here
     // must never crash the whole app before any UI renders.
     private lazy var targetIn = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
@@ -75,6 +76,7 @@ final class LiveVoiceManager: NSObject, ObservableObject, URLSessionDelegate {
     func start() {
         guard !started else { return }
         started = true
+        didGreet = false
         seenLabels.removeAll()
         DispatchQueue.main.async { self.inventory = []; self.caption = "" }
         session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
@@ -211,13 +213,15 @@ final class LiveVoiceManager: NSObject, ObservableObject, URLSessionDelegate {
             let lv = (ev["live_vision"] as? Bool) ?? false
             DispatchQueue.main.async { self.liveVision = lv }
             setStatus(.ready, "Ready — hold to talk")
+            // Greet only on the FIRST ready of a session — reconnects must not re-greet.
+            guard !didGreet else { break }
+            didGreet = true
             sendJSON(["type": "text", "text":
-                "Greet the user warmly in one short sentence. The device is set to country \(country) " +
-                "and currency \(currency); tell them you'll price in that currency and ask them to " +
-                "confirm or tell you a different country — when they answer, call set_locale. " +
-                "Then explain the sweep in ONE sentence: they walk the room once, slowly panning " +
-                "across every shelf, wall and the floor, while you log what you see. Finally tell " +
-                "them to tap Start sweep and hold the button to talk."])
+                "Greet the user warmly in one short sentence and ASK which country and currency " +
+                "they'd like prices in — do NOT assume a country. Mention they can also tap the " +
+                "locale chip, and can change it anytime. Then explain the sweep in ONE sentence: " +
+                "they walk the room once, slowly panning across every shelf, wall and the floor, " +
+                "while you log what you see. Finally tell them to tap Start sweep and hold to talk."])
         case "recognition":
             if let items = ev["items"] as? [[String: Any]] {
                 for it in items {
@@ -225,7 +229,8 @@ final class LiveVoiceManager: NSObject, ObservableObject, URLSessionDelegate {
                     let key = label.lowercased()
                     guard !label.isEmpty, !seenLabels.contains(key) else { continue }
                     seenLabels.insert(key)
-                    let entry = InventoryEntry(kind: (it["kind"] as? String) ?? "item", label: label, note: "seen live")
+                    let note = (it["note"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "seen live"
+                    let entry = InventoryEntry(kind: (it["kind"] as? String) ?? "item", label: label, note: note)
                     DispatchQueue.main.async { self.inventory.insert(entry, at: 0) }
                 }
             }

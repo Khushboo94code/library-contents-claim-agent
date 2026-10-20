@@ -6,7 +6,7 @@ import Foundation
 struct BackendConfig {
     // Set this to your Mac's LAN address, e.g. "http://192.168.1.20:8000".
     // On device + Mac on the same Wi-Fi. Find it with `ipconfig getifaddr en0` on the Mac.
-    static let baseURL = "http://172.20.10.2:8000"  // this Mac's LAN IP; re-check with `ipconfig getifaddr en0`
+    static let baseURL = "http://MacBook-Pro-2.local:8000"  // this Mac's LAN IP; re-check with `ipconfig getifaddr en0`
 }
 
 final class SweepUploader {

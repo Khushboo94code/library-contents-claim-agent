@@ -38,14 +38,16 @@ struct WelcomeView: View {
                 .padding(20)
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(.light)
     }
 
     private var hero: some View {
         VStack(alignment: .leading, spacing: 12) {
-            LogoMark(size: 66, corner: 20)
-            Text("Library Contents\nClaim Agent").font(.system(size: 34, weight: .bold, design: .rounded))
+            LogoMark(size: 64, corner: 20)
+            Text("LIBRARY\nCONTENTS\nCLAIM AGENT")
+                .font(Theme.display(40)).tracking(-0.5)
                 .foregroundStyle(Theme.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
             Text("Inventory and value your home library in one guided camera sweep.")
                 .font(.title3).foregroundStyle(Theme.textSecondary)
         }

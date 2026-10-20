@@ -50,9 +50,11 @@ def _seed_sweep(store: SweepStore, sid: str) -> None:
 
 
 def _mock_stages(monkeypatch):
-    # Stage A: one legible book + one unreadable spine (must be skipped, never guessed).
+    # Stage A: one legible book seen in TWO frames (corroborated → identified) + one unreadable
+    # spine (must be skipped, never guessed).
     monkeypatch.setattr("backend.pipeline.identify_books", lambda *a, **k: [
         {"title": "Dune", "author": "Frank Herbert", "legible": True, "confidence": 0.92, "frame_ref": "frames/0.100.jpg"},
+        {"title": "Dune", "author": "Frank Herbert", "legible": True, "confidence": 0.90, "frame_ref": "frames/0.150.jpg"},
         {"legible": False, "confidence": 0.1, "frame_ref": "frames/0.200.jpg"},
     ])
     # Stage C: a lamp (priceable) + a portrait (art -> needs_appraisal, never auto-priced).

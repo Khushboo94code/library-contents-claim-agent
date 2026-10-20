@@ -15,9 +15,9 @@ from PIL import Image, ImageDraw
 S = 1024
 OUT = pathlib.Path(__file__).resolve().parent.parent / "ios/LibrarySweep/Assets.xcassets/AppIcon.appiconset"
 
-# Accent gradient (matches Theme.accentGradient: indigo -> violet).
-TOP = (99, 102, 241)      # #6366F1
-BOT = (139, 92, 246)      # #8B5CF6
+# Accent gradient (matches Theme.accentGradient: sage light -> sage deep).
+TOP = (178, 201, 148)     # #B2C994
+BOT = (143, 176, 110)     # #8FB06E
 
 
 def _lerp(a, b, t):

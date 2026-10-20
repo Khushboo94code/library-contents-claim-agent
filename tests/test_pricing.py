@@ -57,10 +57,14 @@ ITEM_HTML = """
 
 @pytest.fixture(autouse=True)
 def restore_fetcher():
-    """Each test restores the real fetcher afterwards so nothing leaks."""
+    """Each test restores the real fetchers afterwards so nothing leaks. AbeBooks is
+    stubbed to 'no result' by default so book tests stay offline unless a test opts in."""
     original = pricing._FETCHER
+    original_abe = pricing._ABE_FETCHER
+    pricing.set_abe_fetcher(lambda url: None)
     yield
     pricing.set_fetcher(original)
+    pricing.set_abe_fetcher(original_abe)
 
 
 # --------------------------------------------------------------------------- #
@@ -191,6 +195,106 @@ def test_price_item_single_result_low_equals_high():
     rc = out["replacement_cost"]
     assert rc["low"] == rc["high"] == 750.00
     assert rc["source"] == "amazon"
+
+
+ABE_HTML = """
+<html><body>
+<li data-srp-item-role="listing">
+  <span data-test-id="listing-price">US$ 9.36</span>
+  <span data-test-id="listing-condition">Used - Good</span>
+  <a data-test-id="listing-title-link" href="/Pragmatic/123/bd">The Pragmatic Programmer</a>
+</li>
+<li data-srp-item-role="listing">
+  <span data-test-id="listing-price">US$ 40.00</span>
+  <span data-test-id="listing-condition">New</span>
+  <a data-test-id="listing-title-link" href="/Pragmatic/456/bd">The Pragmatic Programmer</a>
+</li>
+</body></html>
+"""
+
+
+def test_price_book_used_value_from_abebooks_local():
+    # US is a local AbeBooks market → no conversion, picks the cheapest USED offer.
+    pricing.set_fetcher(lambda url, country="IN": None)   # no amazon replacement
+    pricing.set_abe_fetcher(lambda url: ABE_HTML)
+    uv = pricing.price_book("The Pragmatic Programmer", "Andrew Hunt",
+                            country="US", currency="USD")["used_value"]
+    assert uv["amount"] == 9.36                 # cheapest USED, not the $40 New
+    assert uv["source"] == "abebooks"
+    assert uv["condition_assumed"] == "Used - Good"
+    assert uv["url"].startswith("https://www.abebooks.com/")
+
+
+def test_price_book_used_value_converted_for_nonlocal_market():
+    # IN has no local AbeBooks → price on abebooks.com (USD) and convert to INR, labelled.
+    pricing.set_fetcher(lambda url, country="IN": None)
+    pricing.set_abe_fetcher(lambda url: ABE_HTML)
+    uv = pricing.price_book("The Pragmatic Programmer", country="IN", currency="INR")["used_value"]
+    assert uv["amount"] and uv["amount"] > 9.36           # converted up to INR
+    assert "converted from USD" in uv["condition_assumed"]
+
+
+def test_price_book_used_never_exceeds_new():
+    # AbeBooks keyword search can drift to a pricier collectible edition. If the "used"
+    # price comes out ABOVE the new replacement price, it's a wrong-book match → dropped,
+    # never asserted as a used value higher than new.
+    pricey = ABE_HTML.replace("US$ 9.36", "US$ 1500.00")  # above the ~899 new price
+    pricing.set_fetcher(lambda url, country="IN": BOOK_HTML)   # amazon new price exists
+    pricing.set_abe_fetcher(lambda url: pricey)
+    out = pricing.price_book("The Pragmatic Programmer", "Andrew Hunt",
+                             country="US", currency="USD")
+    assert out["replacement_cost"]["amount"] is not None
+    assert out["used_value"]["amount"] is None                 # used > new → dropped
+
+
+def test_price_book_drops_junk_placeholder_and_mismatched_offers():
+    # A $1 ship-cost placeholder and an unrelated edition must both be filtered: only the
+    # title-matching, above-floor offer survives.
+    html = """
+    <html><body>
+    <li data-srp-item-role="listing">
+      <span data-test-id="listing-price">US$ 1.00</span>
+      <span data-test-id="listing-condition">Used - Good</span>
+      <a data-test-id="listing-title-link" href="/p/1/bd">The Pragmatic Programmer</a>
+    </li>
+    <li data-srp-item-role="listing">
+      <span data-test-id="listing-price">US$ 80.00</span>
+      <span data-test-id="listing-condition">Used - Good</span>
+      <a data-test-id="listing-title-link" href="/p/2/bd">Modern Interpreters of Something Else</a>
+    </li>
+    <li data-srp-item-role="listing">
+      <span data-test-id="listing-price">US$ 12.00</span>
+      <span data-test-id="listing-condition">Used - Good</span>
+      <a data-test-id="listing-title-link" href="/p/3/bd">The Pragmatic Programmer</a>
+    </li>
+    </body></html>
+    """
+    pricing.set_fetcher(lambda url, country="IN": None)
+    pricing.set_abe_fetcher(lambda url: html)
+    uv = pricing.price_book("The Pragmatic Programmer", country="US",
+                            currency="USD")["used_value"]
+    assert uv["amount"] == 12.0    # $1 junk + mismatched $80 both dropped
+
+
+def test_price_book_cross_market_replacement_conversion():
+    # No local (IN) replacement, but amazon.com has one → convert + mark converted=True.
+    def fetch(url, country="IN"):
+        return BOOK_HTML if "amazon.com/" in url else None
+    pricing.set_fetcher(fetch)
+    rc = pricing.price_book("The Pragmatic Programmer", "Andrew Hunt",
+                            country="IN", currency="INR")["replacement_cost"]
+    assert rc["converted"] is True
+    assert rc["amount"] and rc["source"] == "amazon.com (converted)"
+
+
+def test_price_book_flags_signed_as_rare():
+    signed = ABE_HTML.replace("Used - Good", "Used - Signed by author")
+    pricing.set_fetcher(lambda url, country="IN": None)
+    pricing.set_abe_fetcher(lambda url: signed)
+    # Title must match the fixture listing ("The Pragmatic Programmer") or the offer is
+    # dropped by the title-match filter before the rare signal can be read.
+    out = pricing.price_book("The Pragmatic Programmer", "", country="US", currency="USD")
+    assert out["rare"] is True
 
 
 def test_price_item_trims_loose_match_outliers():

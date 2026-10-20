@@ -10,11 +10,15 @@ random objects as books. Unreadable spines get legible=false and NO guessed titl
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from backend.ingest.store import SweepStore
 from backend.vision import vision_extract
 
-MAX_FRAMES = int(os.environ.get("STAGE_A_MAX_FRAMES", "8"))
+# Sample densely: a book shown only briefly must still land in the sample. Calls run
+# concurrently so more coverage doesn't blow the latency budget. Dedup happens downstream.
+MAX_FRAMES = int(os.environ.get("STAGE_A_MAX_FRAMES", "24"))
+STAGE_A_WORKERS = int(os.environ.get("STAGE_A_WORKERS", "8"))
 
 _PROMPT = (
     "You are inventorying a BOOKSHELF from ONE photo. Identify ONLY actual published books "
@@ -44,12 +48,17 @@ def identify_books(sweep_id: str, store: SweepStore, api_key: str = "") -> list[
     """Return raw per-spine detections across sampled frames:
     [{bbox, legible, title, author, confidence, frame_ref}] (or {error, frame_ref})."""
     bundle = store.load_bundle(sweep_id)
-    out: list[dict] = []
-    for fr in _select_frames(bundle.frames):
+    frames = _select_frames(bundle.frames)
+
+    def _one(fr):
         try:
             data = vision_extract(_PROMPT, store.frame_path(sweep_id, fr.image).read_bytes())
-            for b in data.get("books", []):
-                out.append({**b, "frame_ref": fr.image})
+            return [{**b, "frame_ref": fr.image} for b in data.get("books", [])]
         except Exception as exc:  # noqa: BLE001 - record per-frame failures, keep going
-            out.append({"error": str(exc), "frame_ref": fr.image})
+            return [{"error": str(exc), "frame_ref": fr.image}]
+
+    out: list[dict] = []
+    with ThreadPoolExecutor(max_workers=STAGE_A_WORKERS) as ex:
+        for dets in ex.map(_one, frames):
+            out.extend(dets)
     return out

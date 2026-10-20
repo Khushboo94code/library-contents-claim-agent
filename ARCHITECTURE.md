@@ -44,7 +44,7 @@ comes from ARKit geometry, prices from scraped pages, and totals from code.
 | **A — Spines** | Detect every spine (incl. flat/stacked), read title/author, resolve edition | **Gemini 2.5 Flash** vision per sampled frame + **Google Books / OpenLibrary** for ISBN/edition | book lines w/ bbox, legibility, confidence |
 | **B — Measure** | Spine height/thickness; shelf run; room floor + wall area | **ARKit plane raycasting** (no model); **ArUco fiducial** (`cv2.aruco` + solvePnP) as scale anchor/fallback; shoelace/Shapely for polygon area | cm per spine, m² per surface |
 | **C — Items** | Detect & classify non-book contents; mark art `needs_appraisal` | **Gemini 2.5 Flash** vision per sampled frame | item lines w/ category, brand/model |
-| **D — Pricing** | Replacement (new) + used value per book; sourced range per item | **Live Amazon scrape** of the confirmed country's marketplace (BeautifulSoup parse), via GCP Cloud Function (India IP) or local proxy | amounts + `url` + `retrieved_at` |
+| **D — Pricing** | Replacement (new) from Amazon; **used value from AbeBooks**; sourced range per item | **Amazon** scrape of the confirmed country's marketplace (new) + **AbeBooks** used-book marketplace (used, localized per country); FX-convert + label `converted` when no local market; rare/signed → `needs_appraisal` | amounts + `url` + `retrieved_at` + `condition_assumed` |
 | **Assembler** | Merge, dedup, compute totals, build review queue | **Pure code** (fuzzy dedup via `difflib`; totals summed) | `claim_packet.json` + report |
 
 ## Where metric scale comes from
@@ -71,9 +71,19 @@ and covered by synthetic-geometry tests.
   if nothing usable is found the amount is `null` and the line is excluded from totals.
 - Fetches go through a **deployed GCP Cloud Function** in `asia-south1` (free rotating India
   egress IP for `amazon.in`); a local `curl_cffi` + proxy path is the fallback.
+- **Used value** comes from **AbeBooks** (the dedicated used/second-hand/rare book marketplace),
+  localized per country (`abebooks.com/.co.uk/.de/.fr/.it`). For countries with no local
+  AbeBooks (IN, AE, SA, MX, TR, BR) we price on `abebooks.com` and FX-convert to the local
+  currency, recording the conversion in `condition_assumed`. The cheapest *Used* offer wins.
+- **Cross-market conversion:** if the local Amazon has no replacement price, we price on
+  `amazon.com`, FX-convert, and set `converted: true`. FX uses a free no-key endpoint
+  (`FX_LIVE=1`) or a static fallback table.
+- **Rare/signed/antiquarian** copies (and anything over a value threshold) are flagged
+  `needs_appraisal` and **not auto-priced**.
+- **Second-country proof:** `scripts/second_country_prices.py` re-prices the same 10 books in a
+  second country, proving locale is a setting (→ `ground_truth/second_country_*.md`).
 - **Item ranges** are built from strong matches only (near the best match score), then
-  **outlier-trimmed around the median**, so an unrelated cheap/premium SKU can't blow out the
-  range. Rare/signed/over-threshold items are routed to `needs_appraisal`, not auto-priced.
+  **outlier-trimmed around the median**, so an unrelated cheap/premium SKU can't blow out the range.
 
 ## Data flow & traceability
 
